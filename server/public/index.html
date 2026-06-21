@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Notification Pipeline Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Event-driven notification system</p>
+        <h1>Notification Pipeline</h1>
+      </div>
+      <div class="health" id="health">Checking Redis</div>
+    </header>
+
+    <main class="shell">
+      <section class="composer">
+        <form id="notification-form">
+          <label>
+            Email
+            <input name="email" type="email" value="student@example.com" required />
+          </label>
+
+          <label>
+            Event type
+            <select name="eventType">
+              <option value="USER_REGISTERED">USER_REGISTERED</option>
+              <option value="ORDER_SHIPPED">ORDER_SHIPPED</option>
+              <option value="PASSWORD_RESET">PASSWORD_RESET</option>
+            </select>
+          </label>
+
+          <label>
+            Demo behavior
+            <select name="failMode">
+              <option value="success">Always succeed</option>
+              <option value="random" selected>Random failures</option>
+              <option value="always">Always fail</option>
+            </select>
+          </label>
+
+          <label class="wide">
+            Subject
+            <input name="subject" value="Welcome to the platform" />
+          </label>
+
+          <button type="submit">Queue Notification</button>
+        </form>
+      </section>
+
+      <section class="metrics" aria-label="Pipeline metrics">
+        <div>
+          <span id="count-total">0</span>
+          <p>Total</p>
+        </div>
+        <div>
+          <span id="count-delivered">0</span>
+          <p>Delivered</p>
+        </div>
+        <div>
+          <span id="count-retry">0</span>
+          <p>Retry Queue</p>
+        </div>
+        <div>
+          <span id="count-dlq">0</span>
+          <p>DLQ</p>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Notifications</h2>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Email</th>
+                  <th>Event</th>
+                  <th>Attempts</th>
+                  <th>Updated</th>
+                </tr>
+              </thead>
+              <tbody id="notifications"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Activity</h2>
+          </div>
+          <ol class="timeline" id="logs"></ol>
+        </div>
+      </section>
+
+      <section class="grid small">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Retry Queue</h2>
+          </div>
+          <div id="retry-queue" class="stack"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Dead Letter Queue</h2>
+          </div>
+          <div id="dlq" class="stack"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
