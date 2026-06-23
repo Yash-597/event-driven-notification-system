@@ -57,6 +57,10 @@ Dashboard
 10. After max retries, the event is moved to `notifications-dlq`.
 11. Operators can replay DLQ messages from the dashboard after fixing the issue.
 
+![Dashboard](images/Dashboard1.png)
+![Dashboard](images/Dashboard2.png)
+![Dashboard](images/Dashboard3.png)
+
 ## Dashboard
 
 The dashboard lets you:
