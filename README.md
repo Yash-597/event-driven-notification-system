@@ -1,123 +1,103 @@
 # Event-Driven Notification System
 
-A resilient notification processing system built with Node.js, Express, and Redis Streams.
+A resilient notification processing system built with **Node.js**, **Express**, **Redis Streams**, and **Resend**.
 
-This version is shaped as an interview-ready backend project: it has an API, a dashboard, background workers, retry handling, idempotency, and a dead-letter queue.
+The system accepts notification requests, queues them asynchronously, sends real emails through Resend, retries failed deliveries with exponential backoff, moves permanently failed messages to a Dead Letter Queue, and supports manual DLQ replay from the dashboard.
 
-## What This System Does
+## Highlights
 
-The system accepts notification requests, queues them as events, processes them asynchronously in a worker, retries failed notifications with exponential backoff, and preserves permanently failed messages in a Dead Letter Queue.
-
-Example use cases:
-
-- send a welcome email after user registration
-- send an order shipped notification
-- send a password reset notification
-- safely retry temporary provider failures
-- inspect permanently failed notifications
+- Event-driven notification ingestion using Redis Streams
+- Real email delivery through Resend
+- Express REST API with a browser dashboard
+- Redis consumer group for worker-based processing
+- Idempotency keys and processing locks to reduce duplicate delivery
+- Exponential-backoff retry queue using a Redis Sorted Set
+- Dead Letter Queue for permanently failed messages
+- Manual DLQ replay from the dashboard
+- Redis-backed API rate limiting to protect the ingestion endpoint
+- AWS Lightsail deployment with Nginx, PM2, and local Redis
 
 ## Architecture
 
 ```text
-Dashboard / API
-      |
-      v
-Redis Stream: notifications-stream
-      |
-      v
+Users
+  -> Nginx reverse proxy
+  -> Node.js / Express app
+  -> Redis rate limiter
+  -> Redis Stream: notifications-stream
+  -> Notification Worker
+  -> Resend email provider
+
+Failure path:
 Notification Worker
-      |
-      +--> success: mark as delivered
-      |
-      +--> failure: schedule retry in Redis Sorted Set
-                         |
-                         v
-                  Retry Worker
-                         |
-                         v
-              re-add event to main stream
+  -> retry queue with exponential backoff
+  -> Retry Worker
+  -> notifications-stream
+  -> DLQ after max retries
 
-After max retries: move to notifications-dlq
+Recovery path:
+Dashboard
+  -> DLQ replay API
+  -> notifications-stream
 ```
 
-## Main Components
+![Architecture](images/Architecture.png)
 
-### API and Dashboard
+## Core Flow
 
-The HTTP server exposes:
+1. A user submits a notification request from the dashboard or API.
+2. The API checks the Redis-backed rate limit for the client IP.
+3. If allowed, the API publishes a notification event to `notifications-stream`.
+4. The notification worker consumes the event through `notifications-group`.
+5. The worker checks idempotency and acquires a processing lock.
+6. The worker sends the email through Resend when `RESEND_API_KEY` is configured.
+7. On success, the event is marked as `delivered` and activity is logged.
+8. On failure, the event is scheduled in the retry queue with exponential backoff.
+9. The retry worker moves due retry messages back to the main stream.
+10. After max retries, the event is moved to `notifications-dlq`.
+11. Operators can replay DLQ messages from the dashboard after fixing the issue.
 
-- `POST /api/notifications` - queue a notification
-- `GET /api/notifications` - view current notification states
-- `GET /api/logs` - view recent pipeline activity
-- `GET /api/retry-queue` - inspect scheduled retries
-- `GET /api/dlq` - inspect dead-lettered messages
-- `POST /api/dlq/:eventId/replay` - replay a DLQ message after fixing the issue
-- `GET /api/health` - check service health
+## Dashboard
 
-`POST /api/notifications` is protected by a Redis-backed rate limiter. By default, each client IP can queue up to 100 notifications per 60 seconds. Requests above the limit are rejected with HTTP `429` before they enter the Redis Stream or call the email provider.
+The dashboard lets you:
 
-The dashboard runs at:
+- queue notification events
+- choose event type and demo failure behavior
+- monitor total, delivered, retry, and DLQ counts
+- inspect notification status and activity logs
+- inspect scheduled retries
+- inspect DLQ messages
+- replay failed DLQ messages back into the stream
 
-```text
-http://localhost:3000
-```
+## API Endpoints
 
-### Producer
-
-Creates notification events and pushes them into Redis Streams.
-
-Each event includes:
-
-- event ID
-- event type
-- email
-- subject
-- channel
-- retry count
-- demo failure mode
-
-### Notification Worker
-
-Consumes events from the Redis Stream and processes them.
-
-It handles:
-
-- idempotency checks
-- processing locks
-- success status updates
-- retry scheduling
-- DLQ movement after max retries
-- stuck message reclaiming
-
-### Retry Worker
-
-Polls the retry queue and re-adds ready messages back into the main stream.
-
-### Notification Service
-
-This project uses a demo notification provider. From the dashboard you can choose:
-
-- always succeed
-- randomly fail
-- always fail
-
-That makes retry and DLQ behavior easy to demonstrate during an interview.
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/health` | Check Redis and email provider status |
+| `POST` | `/api/notifications` | Queue a notification event |
+| `GET` | `/api/notifications` | List notification statuses |
+| `GET` | `/api/logs` | List recent activity logs |
+| `GET` | `/api/retry-queue` | Inspect scheduled retry messages |
+| `GET` | `/api/dlq` | Inspect dead-lettered messages |
+| `POST` | `/api/dlq/:eventId/replay` | Replay a DLQ message |
 
 ## Redis Data Structures
 
 | Name | Type | Purpose |
 | --- | --- | --- |
-| `notifications-stream` | Stream | Main event stream |
-| `notifications-group` | Consumer Group | Worker load sharing |
-| `notifications-retry-queue` | Sorted Set | Retry scheduling by timestamp |
-| `notifications-dlq` | Stream | Permanently failed messages |
-| `notifications-status` | Hash | Current state of each notification |
-| `notifications-activity-log` | List | Recent activity for dashboard |
-| `rate-limit:notifications:{ip}` | String | Per-IP ingestion API rate limit counter |
+| `notifications-stream` | Stream | Main notification event stream |
+| `notifications-group` | Consumer Group | Distributes stream messages across workers |
+| `notifications-retry-queue` | Sorted Set | Stores failed messages by retry timestamp |
+| `notifications-dlq` | Stream | Stores messages that exceeded max retries |
+| `notifications-status` | Hash | Stores latest status for each notification |
+| `notifications-activity-log` | List | Stores recent dashboard activity |
+| `processed:{eventId}` | String | Marks successfully processed events |
+| `processing:{eventId}` | String | Locks events currently being processed |
+| `rate-limit:notifications:{ip}` | String | Tracks per-IP ingestion request counts |
 
-## Retry Logic
+## Retry And DLQ Behavior
 
-The system uses exponential backoff:
+Retries use exponential backoff:
 
 ```text
 1st failure -> retry after 1 second
@@ -126,49 +106,21 @@ The system uses exponential backoff:
 4th failure -> move to DLQ
 ```
 
-## Manual DLQ Replay
+When a message reaches the DLQ, it is preserved for inspection. The dashboard provides a `Replay as Fixed` action that:
 
-Dead-lettered notifications can be replayed from the dashboard with the `Replay as Fixed` button.
-
-Replay does the following:
-
-- finds the failed message in `notifications-dlq`
-- removes that DLQ stream entry with `XDEL`
+- reads the DLQ message
+- removes it from the DLQ stream
 - resets `retryCount` to `0`
-- changes `failMode` to `success` for demo recovery
-- pushes the message back to `notifications-stream`
-- updates status to `replayed`
-- records an activity log
+- sets `failMode` to `success` for demo recovery
+- publishes it back to `notifications-stream`
 
-This models a real operations flow: an engineer fixes the root cause, then manually reprocesses failed messages.
+## Real Email Delivery
 
-## Run Locally
+The system sends real email through Resend when `RESEND_API_KEY` is present.
 
-Prerequisites:
+If no Resend key is configured, the system falls back to demo mode so retries, DLQ, replay, and dashboard behavior can still be tested locally.
 
-- Node.js 18+
-- Redis running locally on `redis://localhost:6379`
-
-Note: if your Redis version does not support `XAUTOCLAIM`, the app still runs. Stuck-message reclaiming is automatically disabled, while normal processing, retries, and DLQ behavior continue to work.
-
-Install dependencies:
-
-```bash
-cd server
-npm install
-```
-
-## Real Email Setup
-
-The project supports real email delivery through Resend.
-
-Without a Resend API key, it automatically runs in demo mode. In demo mode, notification delivery is simulated so you can still test retries, DLQ, and the dashboard.
-
-To enable real email:
-
-1. Create a Resend account.
-2. Generate an API key.
-3. Create a `.env` file inside the `server` folder:
+Create `server/.env`:
 
 ```env
 RESEND_API_KEY=your_resend_api_key_here
@@ -178,65 +130,83 @@ RATE_LIMIT_WINDOW_SECONDS=60
 RATE_LIMIT_MAX_REQUESTS=100
 ```
 
-For quick testing, Resend allows the default `onboarding@resend.dev` sender. For production-style sending, verify your own domain and replace `FROM_EMAIL`.
+`server/.env` is intentionally ignored by Git. Use `server/.env.example` as the safe template.
 
-When real email is enabled, the dashboard health badge shows:
+## Run Locally
 
-```text
-Email resend
+Prerequisites:
+
+- Node.js 18+
+- Redis running on `redis://localhost:6379`
+
+Install dependencies:
+
+```bash
+cd server
+npm install
 ```
 
-When no API key is configured, it shows:
-
-```text
-Email demo
-```
-
-Start the all-in-one demo:
+Start the all-in-one app:
 
 ```bash
 npm start
 ```
 
-Then open:
+Open:
 
 ```text
 http://localhost:3000
 ```
 
+Health check:
+
+```bash
+curl http://localhost:3000/api/health
+```
+
 ## Run Workers Separately
 
-For a production-like setup, run each process separately.
+For a production-like local setup, run workers in separate terminals.
 
-Terminal 1:
+Notification worker:
 
 ```bash
 cd server
 npm run worker:notification
 ```
 
-Terminal 2:
+Retry worker:
 
 ```bash
 cd server
 npm run worker:retry
 ```
 
-Terminal 3:
+Producer:
 
 ```bash
 cd server
 npm run producer
 ```
 
-## Interview Pitch
+## Deployment
 
-"I built a resilient event-driven notification processing system using Node.js and Redis Streams. The API queues notification events, background workers process them asynchronously, failed messages are retried with exponential backoff, and permanently failed messages are moved to a Dead Letter Queue. I also added idempotency and processing locks to avoid duplicate work, plus a dashboard to inspect live pipeline state."
+The project is deployed on AWS Lightsail using:
 
-## Possible Next Improvements
+- Ubuntu server
+- Nginx reverse proxy on port `80`
+- Node.js app running on port `3000`
+- PM2 process manager
+- Redis installed locally and bound to localhost
+- Resend for external email delivery
 
-- integrate a real email provider like Resend, SendGrid, or Nodemailer
-- add MongoDB/PostgreSQL for long-term notification history
-- add authentication for the dashboard
-- add Docker Compose for Redis and the Node server
-- add automated tests for retry and DLQ behavior
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the full deployment guide.
+
+## Future Improvements
+
+- Add authentication for the dashboard
+- Add HTTPS with a custom domain
+- Add automated tests for retry, DLQ, replay, and rate limiting
+- Add long-term persistence in PostgreSQL or MongoDB
+- Add SMS or push notification provider support
+- Add metrics and alerting for worker failures and DLQ growth
